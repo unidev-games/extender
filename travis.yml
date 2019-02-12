@@ -1,0 +1,22 @@
+language: java
+
+# Override the default build step
+script:
+  - jdk_switcher use oraclejdk8
+  - ./server/scripts/build.sh
+
+# Install the latest Java 8
+addons:
+  apt:
+    packages:
+      - oracle-java8-installer
+
+# A peculiarity of dependency caching in Gradle means that to avoid uploading the cache
+# after every build you need to add the following lines:
+before_cache:
+  - rm -f  $HOME/.gradle/caches/modules-2/modules-2.lock
+  - rm -rf $HOME/.gradle/caches/*/plugin-resolution/
+cache:
+  directories:
+    - $HOME/.gradle/caches/
+    - $HOME/.gradle/wrapper/
