@@ -1,6 +1,5 @@
 language: java
 
-
 # Override the default build step
 script:
   - jdk_switcher use oraclejdk8
@@ -12,14 +11,13 @@ addons:
     packages:
       - oracle-java8-installer
 
-
 git:
   submodules:
     false
 
-before_install:
-  - echo -e "\n\nmachine github.com\n  $CI_TOKEN\n" >~/.netrc
-  - git submodule update --init --recursive
+#before_install:
+#  - echo -e "\n\nmachine github.com\n  $CI_TOKEN\n" >~/.netrc
+#  - git submodule update --init --recursive
 
 # A peculiarity of dependency caching in Gradle means that to avoid uploading the cache
 # after every build you need to add the following lines:
