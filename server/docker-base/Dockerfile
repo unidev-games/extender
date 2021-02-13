@@ -1,5 +1,8 @@
 FROM ubuntu:16.04
 
+# We updated to use clang-9 for linux in 1.2.171
+# So once that is the last supported version, we can remove support for GCC5 etc
+
 # Base stuff
 RUN \
   echo "LINUX TOOLS + COMPILER" && \
@@ -52,9 +55,9 @@ ARG DM_PACKAGES_URL
 ENV PLATFORMSDK_DIR /opt/platformsdk
 RUN mkdir $PLATFORMSDK_DIR
 
-# These packages are downloaded from here: http://releases.llvm.org/download.html
+# These packages are downloaded from here: https://github.com/llvm/llvm-project/releases/
 # and then uploaded as-is to S3
-RUN wget -q -O - ${DM_PACKAGES_URL}/clang%2Bllvm-9.0.0-x86_64-linux-gnu-ubuntu-16.04.tar.xz | tar xJ -C /usr/local --strip-components=1
+RUN wget -q -O - ${DM_PACKAGES_URL}/clang%2Bllvm-10.0.1-x86_64-linux-gnu-ubuntu-16.04.tar.xz | tar xJ -C /usr/local --strip-components=1
 
 # Darwin
 RUN locale-gen en_US.UTF-8
@@ -66,6 +69,12 @@ ENV LANG=en_US.UTF-8 \
 # iOS + OSX
 #
 
+# For package instructions, see <defold>/scripts/mobile/package_xcode_and_sdks.sh
+# and <defold>/scripts/mobile/package_cctools.sh
+
+# The install flow for <=1.2.173
+# darwin12 == <1.2.171
+# darwin14 == <=1.2.173
 # The updated install flow
 RUN \
   apt-get update && \
@@ -99,29 +108,82 @@ RUN \
   make install && \
   make distclean && \
   apt-get purge --auto-remove -y git cmake && \
+  cd ../.. && \
   rm -rf apple-libtapi && \
   rm -rf cctools-port
 
-# For package instructions, see <defold>/scripts/mobile/package_xcode_and_sdks.sh
 RUN \
-  wget -q -O - ${DM_PACKAGES_URL}/iPhoneOS12.1.sdk.tar.gz | tar xz -C ${PLATFORMSDK_DIR} && \
-  mv ${PLATFORMSDK_DIR}/iPhoneOS.sdk ${PLATFORMSDK_DIR}/iPhoneOS12.1.sdk && \
   wget -q -O - ${DM_PACKAGES_URL}/iPhoneOS13.0.sdk.tar.gz | tar xz -C ${PLATFORMSDK_DIR} && \
   mv ${PLATFORMSDK_DIR}/iPhoneOS.sdk ${PLATFORMSDK_DIR}/iPhoneOS13.0.sdk && \
-  wget -q -O - ${DM_PACKAGES_URL}/iPhoneSimulator12.1.sdk.tar.gz | tar xz -C ${PLATFORMSDK_DIR} && \
-  mv ${PLATFORMSDK_DIR}/iPhoneSimulator.sdk ${PLATFORMSDK_DIR}/iPhoneSimulator12.1.sdk && \
   wget -q -O - ${DM_PACKAGES_URL}/iPhoneSimulator13.0.sdk.tar.gz | tar xz -C ${PLATFORMSDK_DIR} && \
   mv ${PLATFORMSDK_DIR}/iPhoneSimulator.sdk ${PLATFORMSDK_DIR}/iPhoneSimulator13.0.sdk && \
-  wget -q -O - ${DM_PACKAGES_URL}/MacOSX10.13.sdk.tar.gz | tar xz -C ${PLATFORMSDK_DIR} && \
-  mv ${PLATFORMSDK_DIR}/MacOSX.sdk ${PLATFORMSDK_DIR}/MacOSX10.13.sdk && \
-  wget -q -O - ${DM_PACKAGES_URL}/MacOSX10.15.sdk.tar.gz | tar xz -C ${PLATFORMSDK_DIR} && \
-  mv ${PLATFORMSDK_DIR}/MacOSX.sdk ${PLATFORMSDK_DIR}/MacOSX10.15.sdk && \
   wget -q -O - ${DM_PACKAGES_URL}/XcodeDefault11.0.xctoolchain.slim.tar.gz | tar xz -C ${PLATFORMSDK_DIR} && \
   mv ${PLATFORMSDK_DIR}/XcodeDefault.xctoolchain ${PLATFORMSDK_DIR}/XcodeDefault11.0.xctoolchain
 
+# Install flow for 1.2.171 - 1.2.173
+RUN \
+  wget -q -O - ${DM_PACKAGES_URL}/iPhoneOS13.5.sdk.tar.gz | tar xz -C ${PLATFORMSDK_DIR} && \
+  mv ${PLATFORMSDK_DIR}/iPhoneOS.sdk ${PLATFORMSDK_DIR}/iPhoneOS13.5.sdk && \
+  wget -q -O - ${DM_PACKAGES_URL}/iPhoneSimulator13.5.sdk.tar.gz | tar xz -C ${PLATFORMSDK_DIR} && \
+  mv ${PLATFORMSDK_DIR}/iPhoneSimulator.sdk ${PLATFORMSDK_DIR}/iPhoneSimulator13.5.sdk && \
+  wget -q -O - ${DM_PACKAGES_URL}/XcodeDefault11.5.xctoolchain.tar.gz | tar xz -C ${PLATFORMSDK_DIR} && \
+  mv ${PLATFORMSDK_DIR}/XcodeDefault.xctoolchain ${PLATFORMSDK_DIR}/XcodeDefault11.5.xctoolchain && \
+# A fix for the versions using Xcode 11.5 and specifying the wrong version (e.g. 1.2.173)
+  ln -s ${PLATFORMSDK_DIR}/XcodeDefault11.5.xctoolchain/usr/lib/clang/11.0.3 ${PLATFORMSDK_DIR}/XcodeDefault11.5.xctoolchain/usr/lib/clang/11.0.0
+
+
+ENV LD_LIBRARY_PATH /usr/local/tapi1.4/lib:${LD_LIBRARY_PATH}
+
+# Install flow for 1.2.174
+ENV XCODE_12_VERSION    12.1
+ENV MACOS_10_15_VERSION 10.15
+ENV IOS_14_VERSION      14.0
+ENV LIB_TAPI_1_6_PATH   /usr/local/tapi1.6/lib
+
+# The updated install flow
+RUN \
+  apt-get update && \
+  apt-get install -y git cmake && \
+  cd /tmp && \
+  TAPITMP=/usr/local/tapi1.6 && \
+  mkdir $TAPITMP && \
+  git clone https://github.com/tpoechtrager/apple-libtapi.git && \
+  cd apple-libtapi && \
+  git checkout a66284251b46d591ee4a0cb4cf561b92a0c138d8 && \
+  INSTALLPREFIX=$TAPITMP ./build.sh && \
+  ./install.sh && \
+  cd .. && \
+  git clone https://github.com/tpoechtrager/cctools-port.git && \
+  cd cctools-port/cctools && \
+  git checkout 6c438753d2252274678d3e0839270045698c159b && \
+  ./configure --prefix=/usr/local --target=arm-apple-darwin19 --with-libtapi=$TAPITMP && \
+  make -j8 && \
+  make install && \
+  make distclean && \
+  ./configure --prefix=/usr/local --target=x86_64-apple-darwin19 --with-libtapi=$TAPITMP && \
+  make -j8 && \
+  make install && \
+  make distclean && \
+  cd ../.. && \
+  rm -rf apple-libtapi && \
+  rm -rf cctools-port
+
+RUN \
+  echo "iOS 14 + XCode 12" && \
+  wget -q -O - ${DM_PACKAGES_URL}/iPhoneOS${IOS_14_VERSION}.sdk.tar.gz | tar xz -C ${PLATFORMSDK_DIR} && \
+  mv ${PLATFORMSDK_DIR}/iPhoneOS.sdk ${PLATFORMSDK_DIR}/iPhoneOS${IOS_14_VERSION}.sdk && \
+  wget -q -O - ${DM_PACKAGES_URL}/iPhoneSimulator${IOS_14_VERSION}.sdk.tar.gz | tar xz -C ${PLATFORMSDK_DIR} && \
+  mv ${PLATFORMSDK_DIR}/iPhoneSimulator.sdk ${PLATFORMSDK_DIR}/iPhoneSimulator${IOS_14_VERSION}.sdk && \
+  wget -q -O - ${DM_PACKAGES_URL}/MacOSX${MACOS_10_15_VERSION}.sdk.tar.gz | tar xz -C ${PLATFORMSDK_DIR} && \
+  mv ${PLATFORMSDK_DIR}/MacOSX.sdk ${PLATFORMSDK_DIR}/MacOSX${MACOS_10_15_VERSION}.sdk && \
+  wget -q -O - ${DM_PACKAGES_URL}/XcodeDefault${XCODE_12_VERSION}.xctoolchain.linux.tar.gz | tar xz -C ${PLATFORMSDK_DIR} && \
+  mv ${PLATFORMSDK_DIR}/XcodeDefault.xctoolchain ${PLATFORMSDK_DIR}/XcodeDefault${XCODE_12_VERSION}.xctoolchain
+
+# This part is not yet separable between xcode versions, but should work
 RUN \
   ln -s /usr/local/bin/llvm-ar /usr/local/bin/ar && \
-  ln -s ${PLATFORMSDK_DIR}/XcodeDefault11.0.xctoolchain/usr/lib/arc /usr/local/lib/arc
+  ln -s ${PLATFORMSDK_DIR}/XcodeDefault${XCODE_12_VERSION}.xctoolchain/usr/lib/arc /usr/local/lib/arc
+
 
 #
 # EMSCRIPTEN
@@ -130,6 +192,7 @@ RUN \
 RUN \
   echo "EMSCRIPTEN" && \
   apt-get autoclean && \
+  apt-get update && \
   apt-get install -y --no-install-recommends python2.7 && \
   ln -s /usr/bin/python2.7 /usr/local/bin/python && \
   ln -s /usr/bin/python2.7 /usr/local/bin/python2
@@ -174,6 +237,39 @@ RUN \
   chown -R extender: ${EMSCRIPTEN_CACHE_1_39_16} && \
   chown -R extender: ${EMSCRIPTEN_CACHE_1_39_16}.lock
 
+## Emscripten 2.0.11 (from version 1.2.178)
+
+RUN \
+  add-apt-repository ppa:deadsnakes/ppa && \
+  apt-get autoclean && \
+  apt-get update && \
+  apt-get clean autoclean autoremove && \
+  apt-get install -y --no-install-recommends python3.9 && \
+  update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.5 1 && \
+  update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.9 2 && \
+  python3 --version
+
+ENV EMSCRIPTEN_SDK_2_0_11 ${PLATFORMSDK_DIR}/emsdk-2.0.11
+ENV EMSCRIPTEN_HOME_2_0_11 ${EMSCRIPTEN_SDK_2_0_11}
+ENV EMSCRIPTEN_CONFIG_2_0_11 ${EMSCRIPTEN_HOME_2_0_11}/.emscripten
+ENV EMSCRIPTEN_BIN_2_0_11 ${EMSCRIPTEN_HOME_2_0_11}/upstream/emscripten
+ENV EMSCRIPTEN_CACHE_2_0_11 /var/extender/emcache_2_0_11
+ENV EMSCRIPTEN_PYTHON_2_0_11 /usr/bin/python3.9
+# Setup a special env variable that will be prefixed to PATH if requested version is 2.0.11
+ENV EMSCRIPTEN_PATH_2_0_11 ${EMSCRIPTEN_HOME_2_0_11}:${EMSCRIPTEN_HOME_2_0_11}/upstream/bin:${EMSCRIPTEN_HOME_2_0_11}/node/12.9.1_64bit/bin:${EMSCRIPTEN_BIN_2_0_11}
+
+RUN \
+  mkdir ${EMSCRIPTEN_SDK_2_0_11} && \
+  wget -q -O - ${DM_PACKAGES_URL}/emsdk-2.0.11-linux.tar.gz | tar xz -C ${EMSCRIPTEN_SDK_2_0_11} --strip-components=1
+
+RUN \
+  ${EMSCRIPTEN_HOME_2_0_11}/emsdk activate sdk-2.0.11-64bit --embedded && \
+  EM_CONFIG=$EMSCRIPTEN_CONFIG_2_0_11 EM_CACHE=${EMSCRIPTEN_CACHE_2_0_11} python3 ${EMSCRIPTEN_BIN_2_0_11}/embuilder.py build SYSTEM MINIMAL && \
+  chmod -R 755 ${EMSCRIPTEN_HOME_2_0_11} && \
+  chown -R extender: ${EMSCRIPTEN_CACHE_2_0_11} && \
+  chown -R extender: ${EMSCRIPTEN_CACHE_2_0_11}/wasm/cache.lock
+
+
 # We use the same temp directory for both versions.
 ENV EMSCRIPTEN_TEMP_DIR /var/extender/ems_temp
 RUN mkdir -p ${EMSCRIPTEN_TEMP_DIR}
@@ -184,6 +280,10 @@ RUN sed '/TEMP_DIR =/d' ${EMSCRIPTEN_CONFIG_1_38_12} && \
   echo TEMP_DIR = \'${EMSCRIPTEN_TEMP_DIR}\' >> ${EMSCRIPTEN_CONFIG_1_38_12} && \
   sed '/TEMP_DIR =/d' ${EMSCRIPTEN_CONFIG_1_39_16} && \
   echo TEMP_DIR = \'${EMSCRIPTEN_TEMP_DIR}\' >> ${EMSCRIPTEN_CONFIG_1_39_16}
+
+RUN \
+  update-alternatives --set python3 /usr/bin/python3.5
+
 
 #
 # Windows
@@ -281,18 +381,34 @@ RUN \
   (cd ${WINDOWS_SDK_10_DIR}/Include/${WINDOWS_SDK_10_VERSION}/shared && cp concurrencysal.h ConcurrencySal.h) && \
   (cd ${WINDOWS_SDK_10_DIR}/Lib/${WINDOWS_SDK_10_VERSION} && find . -type f -exec sh -c 'x="{}"; xl=$(echo $x | sed -e "s/\(.*\)/\L\1/"); if [ $x != $xl ]; then cp $x $xl; fi' \;)
 
+# Also, the OpenGL headers in the windows SDK is in a folder with lower case letters, which doesn't match the includes
+RUN \
+  echo "WIN32 WindowsKits 10 - OpenGL Cleanup" && \
+  cd ${WINDOWS_SDK_10_DIR}/Include/${WINDOWS_SDK_10_VERSION}/um && \
+  mkdir ./GL && \
+  cp -v ./gl/*.* ./GL/
 
 #
 # Android SDK/NDK
+# https://developer.android.com/studio/command-line/variables
 #
 ENV ANDROID_ROOT ${PLATFORMSDK_DIR}/android
-ENV ANDROID_BUILD_TOOLS_VERSION 23.0.2
+ENV ANDROID_BUILD_TOOLS_VERSION 29.0.3
+# ANDROID_HOME has been replaced with ANDROID_SDK_ROOT
 ENV ANDROID_HOME ${ANDROID_ROOT}/android-sdk-linux
+ENV ANDROID_SDK_ROOT ${ANDROID_HOME}
+# ANDROID_SDK_HOME is the location of the .android folder
+ENV ANDROID_SDK_HOME ${ANDROID_ROOT}/.android
 ENV ANDROID_TARGET_API_LEVEL 23
 ENV ANDROID_MIN_API_LEVEL 9
 ENV ANDROID_GCC_VERSION 4.8
 ENV ANDROID_SDK_VERSION 29
-ENV ANDROID_SDK_FILENAME android-sdk-linux-android-${ANDROID_SDK_VERSION}.tar.gz
+ENV ANDROID_SDK_FILENAME android-sdk-linux-android-${ANDROID_SDK_VERSION}-${ANDROID_BUILD_TOOLS_VERSION}.tar.gz
+ENV ANDROID_STL_INCLUDE ${ANDROID_ROOT}/android-ndk-r${ANDROID_NDK_VERSION}/sources/cxx-stl/gnu-libstdc++/${ANDROID_GCC_VERSION}/include
+ENV ANDROID_STL_ARCH_INCLUDE ${ANDROID_ROOT}/android-ndk-r${ANDROID_NDK_VERSION}/sources/cxx-stl/gnu-libstdc++/${ANDROID_GCC_VERSION}/libs/armeabi-v7a/include
+ENV ANDROID_STL_LIB ${ANDROID_ROOT}/android-ndk-r${ANDROID_NDK_VERSION}/sources/cxx-stl/gnu-libstdc++/${ANDROID_GCC_VERSION}/libs/armeabi-v7a
+ENV ANDROID_SYSROOT ${ANDROID_ROOT}/android-ndk-r${ANDROID_NDK_VERSION}/platforms/android-${ANDROID_NDK_API_VERSION}/arch-arm
+ENV ANDROID_BIN_PATH ${ANDROID_ROOT}/android-ndk-r${ANDROID_NDK_VERSION}/toolchains/arm-linux-androideabi-${ANDROID_GCC_VERSION}/prebuilt/linux-x86_64/bin
 ENV ANDROID_SDK_BUILD_TOOLS_PATH ${ANDROID_HOME}/build-tools/${ANDROID_BUILD_TOOLS_VERSION}
 ENV ANDROID_LIBRARYJAR ${ANDROID_HOME}/platforms/android-${ANDROID_SDK_VERSION}/android.jar
 
@@ -343,8 +459,13 @@ RUN \
     rm -rf ${ANDROID_NDK20_PATH}/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-* && \
     rm -rf ${ANDROID_NDK20_PATH}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/x86_64-linux-android && \
     rm -rf ${ANDROID_NDK20_PATH}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/i686-linux-android && \
+# create the .android folder and give read+write permissions (the Android Gradle plugin will write to the folder)
+# It is not enough to give 'user' and 'group'. We unfortunately also need 'others'
+    mkdir ${ANDROID_SDK_HOME} && \
+    chmod ugo+rw -R ${ANDROID_SDK_HOME} && \
 # fix permissions
     chmod +r -R ${ANDROID_ROOT} && \
+    chmod +w -R ${ANDROID_SDK_ROOT} && \
     chmod -R 755 ${ANDROID_ROOT}/android-ndk-r${ANDROID_NDK20_VERSION} && \
 # check that dx installed properly
     ls -la ${ANDROID_SDK_BUILD_TOOLS_PATH}/dx && \
@@ -352,21 +473,6 @@ RUN \
     which aarch64-linux-android${ANDROID_64_NDK20_API_VERSION}-clang++ && \
 # check that aapt installed correctly
     aapt v
-
-ENV GRADLE_USER_HOME /tmp/.gradle
-ENV GRADLE_VERSION 6.0.1
-ENV PATH ${PATH}:/opt/gradle/gradle-${GRADLE_VERSION}/bin
-RUN \
-  echo "Gradle" && \
-  wget -q https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip && \
-  mkdir /opt/gradle && \
-  unzip -q -d /opt/gradle gradle-${GRADLE_VERSION}-bin.zip && \
-  rm gradle-${GRADLE_VERSION}-bin.zip && \
-  which gradle && \
-  chown -R extender: /opt/gradle
-
-ENV EXTENSION_GRADLE_TEMPLATE /var/extender/template.build.gradle
-COPY template.build.gradle ${EXTENSION_GRADLE_TEMPLATE}
 
 #
 # Switch SDK
@@ -396,7 +502,7 @@ RUN \
 RUN \
  echo "Wine deps" && \
  apt-get update && \
- apt-get install -y --no-install-recommends apt-transport-https ca-certificates ca-certificates-java xvfb && \
+ apt-get install -y --no-install-recommends apt-transport-https ca-certificates ca-certificates-java xvfb cabextract && \
  apt-get clean autoclean autoremove
 
 RUN \
@@ -435,6 +541,28 @@ RUN \
 
 RUN \
   chown -R extender: $WINEPREFIX
+
+# Technically part of the Android build, but also required bythe GradleService.java
+# until it can be disabled (e.g. by looking for the existance of GRADLE_USER_HOME)
+
+ENV GRADLE_USER_HOME /tmp/.gradle
+ENV GRADLE_VERSION 6.1.1
+ENV PATH ${PATH}:/opt/gradle/gradle-${GRADLE_VERSION}/bin
+RUN \
+  echo "Gradle" && \
+  wget -q https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip && \
+  mkdir /opt/gradle && \
+  unzip -q -d /opt/gradle gradle-${GRADLE_VERSION}-bin.zip && \
+  rm gradle-${GRADLE_VERSION}-bin.zip && \
+  which gradle && \
+  chown -R extender: /opt/gradle
+
+ENV EXTENSION_BUILD_GRADLE_TEMPLATE /var/extender/template.build.gradle
+ENV EXTENSION_GRADLE_PROPERTIES_TEMPLATE /var/extender/template.gradle.properties
+ENV EXTENSION_LOCAL_PROPERTIES_TEMPLATE /var/extender/template.local.properties
+COPY template.build.gradle ${EXTENSION_BUILD_GRADLE_TEMPLATE}
+COPY template.gradle.properties ${EXTENSION_GRADLE_PROPERTIES_TEMPLATE}
+COPY template.local.properties ${EXTENSION_LOCAL_PROPERTIES_TEMPLATE}
 
 RUN \
   apt-get remove -y apt-transport-https xvfb && \

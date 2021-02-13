@@ -10,6 +10,8 @@ import org.slf4j.LoggerFactory;
 import org.yaml.snakeyaml.Yaml;
 import org.yaml.snakeyaml.error.YAMLException;
 
+import java.io.BufferedWriter;
+import java.io.FileWriter;
 import java.io.File;
 import java.io.FileFilter;
 import java.io.IOException;
@@ -17,10 +19,13 @@ import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.*;
+import java.util.concurrent.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
+
+import com.defold.extender.services.GradleService;
 
 class Extender {
     private static final Logger LOGGER = LoggerFactory.getLogger(Extender.class);
@@ -37,6 +42,7 @@ class Extender {
     private final ProcessExecutor processExecutor = new ProcessExecutor();
     private final Map<String, Object> appManifestContext;
     private final Boolean withSymbols;
+    private final Boolean useJetifier;
 
     private Map<String, Map<String, Object>>    manifestConfigs;
     private Map<String, File>                   manifestFiles;
@@ -49,6 +55,7 @@ class Extender {
 
     static final String APPMANIFEST_BASE_VARIANT_KEYWORD = "baseVariant";
     static final String APPMANIFEST_WITH_SYMBOLS_KEYWORD = "withSymbols";
+    static final String APPMANIFEST_JETIFIER_KEYWORD = "jetifier";
     static final String FRAMEWORK_RE = "(.+)\\.framework";
     static final String JAR_RE = "(.+\\.jar)";
     static final String JS_RE = "(.+\\.js)";
@@ -75,11 +82,11 @@ class Extender {
 
     private static final boolean DM_DEBUG_DISABLE_PROGUARD = System.getenv("DM_DEBUG_DISABLE_PROGUARD") != null;
 
-    Extender(String platform, File sdk, File jobDirectory, File uploadDirectory, File buildDirectory, List<File> gradlePackages) throws IOException, ExtenderException {
+    Extender(String platform, File sdk, File jobDirectory, File uploadDirectory, File buildDirectory) throws IOException, ExtenderException {
         this.jobDirectory = jobDirectory;
         this.uploadDirectory = uploadDirectory;
         this.buildDirectory = buildDirectory;
-        this.gradlePackages = gradlePackages;
+        this.gradlePackages = new ArrayList<>();;
 
         // Read config from SDK
         this.config = Extender.loadYaml(this.jobDirectory, new File(sdk.getPath() + "/extender/build.yml"), Configuration.class);
@@ -132,6 +139,7 @@ class Extender {
             }
         }
 
+        this.useJetifier = ExtenderUtil.getAppManifestBoolean(appManifest, platform, APPMANIFEST_JETIFIER_KEYWORD, false);
         this.withSymbols = ExtenderUtil.getAppManifestContextBoolean(appManifest, APPMANIFEST_WITH_SYMBOLS_KEYWORD, false);
 
         this.platform = platform;
@@ -174,7 +182,7 @@ class Extender {
         this.manifestValidator = new ExtensionManifestValidator(new WhitelistConfig(), this.platformConfig.allowedFlags, allowedSymbols);
 
         // Make sure the user hasn't input anything invalid in the manifest
-        this.manifestValidator.validate(this.appManifestPath, appManifestContext);
+        this.manifestValidator.validate(this.appManifestPath, this.uploadDirectory, appManifestContext);
 
         // Collect extension directories (used by both buildEngine and buildClassesDex)
         this.manifests = allFiles.stream().filter(f -> f.getName().equals("ext.manifest")).collect(Collectors.toList());
@@ -338,33 +346,12 @@ class Extender {
             context.put(k, v);
         }
 
-        // Added in 1.2.163 to make it easier to upgrade to Clang 9
+        // Added to build.yml in 1.2.174 (setting for using Clang 9)
         if (this.platform.contains("ios") || this.platform.contains("osx")) {
             LOGGER.debug("Adding arclite hack to ios/osx");
             List<String> linkFlags = (List<String>)context.get("linkFlags");
             if (!linkFlags.contains("-Wl,-U,_objc_loadClassref")) {
                 linkFlags.add("-Wl,-U,_objc_loadClassref");
-            }
-
-            List<String> libs = (List<String>)context.get("libs");
-            if (this.platform.contains("osx")) {
-                if (!libs.contains("clang_rt.osx")) {
-                    libs.add("clang_rt.osx");
-                }
-            } else {
-                if (!libs.contains("clang_rt.ios")) {
-                    libs.add("clang_rt.ios");
-                }
-            }
-
-            Object platformsdk_dir = this.platformConfig.context.get("env.PLATFORMSDK_DIR");
-            if (platformsdk_dir == null) {
-                platformsdk_dir = "/opt/platformsdk";
-            }
-            String path = String.format("%s/XcodeDefault11.0.xctoolchain/usr/lib/clang/11.0.0/lib/darwin", platformsdk_dir);
-            List<String> libPaths = (List<String>)context.get("libPaths");
-            if (!libPaths.contains(path)) {
-                libPaths.add(path);
             }
         }
         // Added in 2019, should be removed soon
@@ -442,10 +429,20 @@ class Extender {
         return allLibJars;
     }
 
-    private File compileFile(int index, File extDir, File src, Map<String, Object> manifestContext) throws IOException, InterruptedException, ExtenderException {
+    private File compileFile(int index, File extDir, File src, Map<String, Object> manifestContext, List<String> commands) throws IOException, InterruptedException, ExtenderException {
         List<String> includes = new ArrayList<>();
-        includes.add( ExtenderUtil.getRelativePath(jobDirectory, new File(extDir, "include") ) );
+        File extIncludeDir = new File(extDir, "include");
+        includes.add( ExtenderUtil.getRelativePath(jobDirectory, extIncludeDir ) );
         includes.add( ExtenderUtil.getRelativePath(jobDirectory, uploadDirectory) );
+
+        // Add the other extensions include folders
+        for (File otherExtDir : this.getExtensionFolders()) {
+            File otherIncludeDir = new File(otherExtDir, "include");
+            if (extIncludeDir.equals(otherIncludeDir))
+                continue;
+            includes.add( ExtenderUtil.getRelativePath(jobDirectory, otherIncludeDir ) );
+        }
+
         File o = new File(buildDirectory, String.format("%s_%d.o", src.getName(), index));
 
         List<String> frameworks = getFrameworks(extDir);
@@ -457,7 +454,7 @@ class Extender {
         context.put("ext", ImmutableMap.of("includes", includes, "frameworks", frameworks, "frameworkPaths", frameworkPaths));
 
         String command = templateExecutor.execute(platformConfig.compileCmd, context);
-        processExecutor.execute(command);
+        commands.add(command);
         return o;
     }
 
@@ -504,13 +501,42 @@ class Extender {
         Arrays.sort(srcFiles, NameFileComparator.NAME_INSENSITIVE_COMPARATOR);
 
         List<String> objs = new ArrayList<>();
+        List<String> commands = new ArrayList<>();
 
         // Compile C++ source into object files
         int i = getAndIncreaseNameCount();
         for (File src : srcFiles) {
-            File o = compileFile(i, extDir, src, manifestContext);
+            File o = compileFile(i, extDir, src, manifestContext, commands);
             objs.add(ExtenderUtil.getRelativePath(jobDirectory, o));
             i++;
+        }
+
+        ExecutorService executor = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors());
+        List<Callable<Void>> callables = new ArrayList<>();
+        for (String command : commands) {
+            callables.add(new Callable<Void>() {
+                @Override
+                public Void call() throws Exception {
+                    processExecutor.execute(command);
+                    return null;
+                }
+            });
+        }
+        List<Future<Void>> futures = executor.invokeAll(callables);
+        try {
+            for (Future<Void> future : futures) {
+                future.get();
+            }
+        } catch (ExecutionException e) {
+            if (e.getCause() instanceof IOException) {
+                throw (IOException)e.getCause();
+            } else if (e.getCause() instanceof InterruptedException) {
+                throw (InterruptedException)e.getCause();
+            } else {
+                throw new ExtenderException(e.getCause().toString());
+            }
+        } finally {
+            executor.shutdown();
         }
 
         // Create c++ library
@@ -596,6 +622,9 @@ class Extender {
         extLibs = ExtenderUtil.pruneItems( extLibs, ExtenderUtil.getStringList(mainContext, "includeLibs"), ExtenderUtil.getStringList(mainContext, "excludeLibs"));
         extJsLibs = ExtenderUtil.pruneItems( extJsLibs, ExtenderUtil.getStringList(mainContext, "includeJsLibs"), ExtenderUtil.getStringList(mainContext, "excludeJsLibs"));
 
+        // This is a workaround due to a linker crash when the helpshift "Support" library is in front of the Facebook extension (not certain of this though)
+        Collections.sort(extLibs, Collections.reverseOrder());
+
         String writeExePattern = platformConfig.writeExePattern;
         if (writeExePattern == null ) {
             writeExePattern = String.format("%sdmengine%s", platformConfig.exePrefix, platformConfig.exeExt); // Legacy, remove in a few versions!
@@ -622,6 +651,7 @@ class Extender {
         context.put("engineLibs", ExtenderUtil.pruneItems(ExtenderUtil.getStringList(context, "engineLibs"), ExtenderUtil.getStringList(mainContext, "includeLibs"), ExtenderUtil.getStringList(mainContext, "excludeLibs")) );
         context.put("engineJsLibs", ExtenderUtil.pruneItems(ExtenderUtil.getStringList(context, "engineJsLibs"), ExtenderUtil.getStringList(mainContext, "includeJsLibs"), ExtenderUtil.getStringList(mainContext, "excludeJsLibs")) );
         context.put("objectFiles", ExtenderUtil.pruneItems(ExtenderUtil.getStringList(mainContext, "objectFiles"), ExtenderUtil.getStringList(mainContext, "includeObjectFiles"), ExtenderUtil.getStringList(mainContext, "excludeObjectFiles") ));
+        context.put("dynamicLibs", ExtenderUtil.pruneItems(ExtenderUtil.getStringList(context, "dynamicLibs"), ExtenderUtil.getStringList(mainContext, "includeDynamicLibs"), ExtenderUtil.getStringList(mainContext, "excludeDynamicLibs")) );
 
         // WINE->clang transition pt1: in the transition period from link.exe -> lld, we want to make sure we can write "foo" as opposed to "foo.lib"
         context.put("libs", patchLibs((List<String>) context.get("libs")));
@@ -720,6 +750,122 @@ class Extender {
                             .collect(Collectors.toList());
     }
 
+
+
+    private static File createDir(File parent, String child) throws IOException {
+        File dir = new File(parent, child);
+        dir.mkdirs();
+        return dir;
+    }
+    private static File createDir(String parent, String child) throws IOException {
+        return createDir(new File(parent), child);
+    }
+
+
+    private Map<String, Object> createContext() throws ExtenderException {
+        HashMap<String, Object> empty = new HashMap<>();
+        Map<String, Object> context = context(empty);
+        return context;
+    }
+
+    /**
+    * Compile android resources into "flat" files
+    * https://developer.android.com/studio/build/building-cmdline#compile_and_link_your_apps_resources
+    */
+    private File compileAndroidResources(String platform, Map<String, Object> mergedAppContext) throws ExtenderException {
+        LOGGER.info("Compiling Android resources");
+
+        File outputDirectory = new File(buildDirectory, "compiledResources");;
+        try {
+            // get all directories containing resources to compile
+            List<String> resourceDirectories = getAndroidResourceFolders(platform)
+                                                                .stream()
+                                                                .map(File::getAbsolutePath)
+                                                                .collect(Collectors.toList());
+
+            Map<String, Object> context = createContext();
+            for (String resDir : resourceDirectories) {
+                // /tmp/.gradle/unpacked/android.arch.lifecycle-livedata-1.1.1.aar/res
+                File resourceDirectory = new File(resDir);
+                // android.arch.lifecycle-livedata-1.1.1.aar
+                String packageName = resourceDirectory.getParentFile().getName();
+
+                // we compile the package resources to one output directory per package
+                File packageDirectoryOut = createDir(outputDirectory, packageName);
+                context.put("outputDirectory", packageDirectoryOut.getAbsolutePath());
+
+                // iterate over the directories in the res directory of the package
+                for (File resourceTypeDir : resourceDirectory.listFiles(File::isDirectory)) {
+                    // compile each resource file to a .flat file
+                    for (File resourceFile : resourceTypeDir.listFiles()) {
+                        context.put("resourceFile", resourceFile.getAbsolutePath());
+
+                        String command = templateExecutor.execute(platformConfig.aapt2compileCmd, context);
+                        processExecutor.execute(command);
+                    }
+                }
+            }
+
+        } catch (IOException | InterruptedException e) {
+            throw new ExtenderException(e, processExecutor.getOutput());
+        }
+
+        return outputDirectory;
+    }
+
+    private Map<String, File> linkAndroidResources(File compiledResourcesDir, String platform, Map<String, Object> mergedAppContext) throws ExtenderException {
+        LOGGER.info("Linking Android resources");
+
+        Map<String, Object> context = createContext();
+        Map<String, File> files = new HashMap<>();
+
+        try {
+            // write compiled resource list to a txt file
+            StringBuilder sb = new StringBuilder();
+            for (File packageDir : compiledResourcesDir.listFiles(File::isDirectory)) {
+                for (File file : packageDir.listFiles()) {
+                    if (file.getAbsolutePath().endsWith(".flat")) {
+                        sb.append(file.getAbsolutePath() + " ");
+                    }
+                }
+            }
+            File resourceList = new File(buildDirectory, "compiledresources.txt");
+            try (BufferedWriter writer = new BufferedWriter(new FileWriter(resourceList))) {
+                writer.write(sb.toString());
+            }
+            context.put("resourceListFile", resourceList.getAbsolutePath());
+
+            // extra packages
+            if (mergedAppContext.containsKey("aaptExtraPackages")) {
+                context.put("extraPackages", String.join(":", (List<String>)mergedAppContext.get("aaptExtraPackages")));
+            }
+
+            File manifestFile = new File(buildDirectory, MANIFEST_ANDROID);
+            context.put("manifestFile", manifestFile.getAbsolutePath());
+
+            File resourceIdsFile = new File(buildDirectory, "resource_ids.txt");
+            context.put("resourceIdsFile", resourceIdsFile.getAbsolutePath());
+
+            File outputJavaDirectory = createDir(buildDirectory, "out_java");
+            context.put("outJavaDirectory", outputJavaDirectory.getAbsolutePath());
+
+            File outApkFile = new File(buildDirectory, "compiledresources.apk");
+            context.put("outApkFile", outApkFile.getAbsolutePath());
+
+            files.put("resourceIdsFile", resourceIdsFile);
+            files.put("outApkFile", outApkFile);
+            files.put("outJavaDirectory", outputJavaDirectory);
+
+            String command = templateExecutor.execute(platformConfig.aapt2linkCmd, context);
+            processExecutor.execute(command);
+        }
+        catch (IOException | InterruptedException e) {
+            throw new ExtenderException(e, processExecutor.getOutput());
+        }
+
+        return files;
+    }
+
     // https://manpages.debian.org/jessie/aapt/aapt.1.en.html
     private File generateRJava(String platform, Map<String, Object> mergedAppContext) throws ExtenderException {
         File rJavaDir = new File(uploadDirectory, "_app/rjava");
@@ -798,8 +944,7 @@ class Extender {
                 }
 
                 // Compile sources into class files
-                HashMap<String, Object> empty = new HashMap<>();
-                Map<String, Object> context = context(empty);
+                Map<String, Object> context = createContext();
                 context.put("classesDir", classesDir.getAbsolutePath());
                 context.put("classPath", classesDir.getAbsolutePath());
                 context.put("sourcesListFile", sourcesListFile.getAbsolutePath());
@@ -807,7 +952,7 @@ class Extender {
                 processExecutor.execute(command);
 
                 // Collect all classes into a Jar file
-                context = context(empty);
+                context = createContext();
                 context.put("outputJar", outputJar.getAbsolutePath());
                 context.put("classesDir", classesDir.getAbsolutePath());
                 command = templateExecutor.execute(platformConfig.jarCmd, context);
@@ -957,7 +1102,7 @@ class Extender {
                     manifestContext = getManifestContext(platform, config, manifestConfig);
                 }
 
-                this.manifestValidator.validate(manifestConfig.name, manifestContext);
+                this.manifestValidator.validate(manifestConfig.name, manifest.getParentFile(), manifestContext);
 
                 manifestConfigs.put(manifestConfig.name, manifestContext);
 
@@ -990,8 +1135,7 @@ class Extender {
             extensionJars.add(extensionJar.getKey());
         }
 
-        HashMap<String, Object> empty = new HashMap<>();
-        Map<String, Object> context = context(empty);
+        Map<String, Object> context = createContext();
         List<String> allJars = ExtenderUtil.pruneItems( (List<String>)context.get("engineJars"), includeJars, excludeJars);
         allJars.addAll( ExtenderUtil.pruneItems( extensionJars, includeJars, excludeJars) );
         return allJars;
@@ -1100,8 +1244,7 @@ class Extender {
         jarLibrariesList = ExtenderUtil.excludeItems(jarLibrariesList, excludeJars);
         jarList = ExtenderUtil.excludeItems(jarList, excludeJars);
 
-        HashMap<String, Object> empty = new HashMap<>();
-        Map<String, Object> context = context(empty);
+        Map<String, Object> context = createContext();
         context.put("jars", jarList);
         context.put("libraryjars", jarLibrariesList);
         context.put("src", allPro);
@@ -1194,8 +1337,7 @@ class Extender {
         // The empty list is also present for backwards compatability with older build.yml
         List<String> empty_list = new ArrayList<>();
 
-        HashMap<String, Object> empty = new HashMap<>();
-        Map<String, Object> context = context(empty);
+        Map<String, Object> context = createContext();
         context.put("classes_dex", classesDex.getAbsolutePath());
         context.put("classes_dex_dir", buildDirectory.getAbsolutePath());
         context.put("jars", jars);
@@ -1257,7 +1399,7 @@ class Extender {
             }
 
             String relativePath = ExtenderUtil.getRelativePath(this.uploadDirectory, manifest);
-            this.manifestValidator.validate(relativePath, manifestContext);
+            this.manifestValidator.validate(relativePath, manifest.getParentFile(), manifestContext);
 
             // Apply any global settings to the context
             manifestContext.put("extension_name", manifestConfig.name);
@@ -1288,7 +1430,10 @@ class Extender {
         try {
             List<String> symbols = new ArrayList<>();
 
-            Set<String> keys = manifestConfigs.keySet();
+            Set<String> keyset = manifestConfigs.keySet();
+            String[] keys = keyset.toArray(new String[keyset.size()]);
+            Arrays.sort(keys);
+
             for (String extensionSymbol : keys) {
                 symbols.add(extensionSymbol);
 
@@ -1350,7 +1495,24 @@ class Extender {
 
         List<File> outputFiles = new ArrayList<>();
 
-        File rJavaDir = generateRJava(platform, mergedAppContext);
+        File rJavaDir = null;
+        // 1.2.174
+        if (platformConfig.aapt2compileCmd != null) {
+            // compile and link all of the resource files
+            // we get the compiled resources and some additional data in an apk which we pass back to the client
+            // we also get a mapping of resources to resource ids which is useful for debugging
+            // we finally also get one or more R.java files which we use in the next step when compiling all java files
+            File compiledResourcesDir = compileAndroidResources(platform, mergedAppContext);
+            Map<String, File> files = linkAndroidResources(compiledResourcesDir, platform, mergedAppContext);
+            outputFiles.add(files.get("outApkFile"));
+            outputFiles.add(files.get("resourceIdsFile"));
+            rJavaDir = files.get("outJavaDirectory");
+        }
+        else {
+            rJavaDir = generateRJava(platform, mergedAppContext);
+        }
+
+        // take the generated R.java files and compile them to jar files
         File rJar = buildRJar(rJavaDir);
 
         Map<String, ProGuardContext> extensionJarMap = buildJava(rJar);
@@ -1476,8 +1638,7 @@ class Extender {
             LOGGER.info("Merging manifests");
 
             // Merge the files
-            HashMap<String, Object> empty = new HashMap<>();
-            Map<String, Object> context = context(empty);
+            Map<String, Object> context = createContext();
             context.put("mainManifest", mainManifest.getAbsolutePath());
             context.put("target", targetManifest.getAbsolutePath());
 
@@ -1510,6 +1671,17 @@ class Extender {
         }
         return outputFiles;
     }
+
+    List<File> resolve(GradleService gradleService) throws ExtenderException {
+        try {
+            gradlePackages = gradleService.resolveDependencies(jobDirectory, useJetifier);
+        }
+        catch (IOException e) {
+            throw new ExtenderException(e, "Failed to resolve dependencies");
+        }
+        return gradlePackages;
+    }
+
 
     List<File> build() throws ExtenderException {
         List<File> outputFiles = new ArrayList<>();

@@ -3,11 +3,13 @@ package com.defold.extender;
 import java.io.File;
 import java.io.FileFilter;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.nio.file.Path;
 
 import org.apache.commons.io.FileUtils;
 import org.apache.commons.io.filefilter.DirectoryFileFilter;
@@ -302,6 +304,7 @@ public class ExtenderUtil
                 }
             }
         }
+        Collections.sort(result);
         return result;
     }
 
@@ -321,6 +324,7 @@ public class ExtenderUtil
                 }
             }
         }
+        Collections.sort(result);
         return result;
     }
 
@@ -379,4 +383,9 @@ public class ExtenderUtil
         return null;
     }
 
+    public static boolean isChild(File parent, File child) {
+        Path parentPath = parent.toPath().normalize().toAbsolutePath();
+        Path childPath = child.toPath().normalize().toAbsolutePath();
+        return childPath.startsWith(parentPath);
+    }
 }
